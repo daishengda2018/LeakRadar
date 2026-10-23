@@ -33,6 +33,9 @@ def validate_event(event, package):
             raise ValueError(key + " 必须为不超过 128 字符的单行文本")
     if "versionCode" in event and (type(event["versionCode"]) is not int or event["versionCode"] < 0):
         raise ValueError("versionCode 必须为非负整数")
+    if "sessionId" in event and (not isinstance(event["sessionId"], str)
+                                  or not 1 <= len(event["sessionId"]) <= 128):
+        raise ValueError("sessionId 必须为 1 至 128 字符的字符串")
     # 可选 candidates 仅归档，V1 不把它们当作 Shark 已确认的泄漏。
     return event
 

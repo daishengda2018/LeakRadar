@@ -126,7 +126,7 @@ class Contracts(unittest.TestCase):
             with patch.dict("os.environ", {"LEAK_LOCAL_PROPERTIES": str(properties)}), patch(
                     "urllib.request.urlopen", side_effect=lambda *args, **kwargs: io.BytesIO(b'{"errcode":0}')):
                 self.assertEqual("sent", notify(event, result, directory, state))
-                self.assertEqual([event["packageName"] + ":" + first], json.loads(state.read_text()))
+                self.assertEqual([event["packageName"] + ":1:" + first], json.loads(state.read_text()))
 
 
     def test_new_signature_notification_contains_all_current_traces(self):
@@ -139,7 +139,7 @@ class Contracts(unittest.TestCase):
             properties = directory / "local.properties"
             properties.write_text("simpleLeakCanary.dingTalkToken=fixture-only\n")
             event = {"packageName": "com.example.app", "pid": 1}
-            state.write_text(json.dumps([event["packageName"] + ":" + first]))
+            state.write_text(json.dumps([event["packageName"] + ":1:" + first]))
             (directory / "analysis.log").write_text(
                 f"Signature: {first}\nGC Root: first-root\n"
                 f"Signature: {second}\nGC Root: second-root\n")
@@ -154,6 +154,28 @@ class Contracts(unittest.TestCase):
                 self.assertIn(f"2. Signature: *{second}*", text)
                 self.assertEqual("deduplicated", notify(event, result, directory, state))
                 self.assertEqual(1, request.call_count)
+
+    def test_app_restart_allows_same_signature_notification(self):
+        import io
+        from leak.radar.notifier import notify
+        signature = "a" * 40
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            state = directory / "notified.json"
+            properties = directory / "local.properties"
+            properties.write_text("simpleLeakCanary.dingTalkToken=fixture-only\n")
+            (directory / "analysis.log").write_text(f"Signature: {signature}\nGC Root: fixture\n")
+            event = {"packageName": "com.example.app", "pid": 1, "sessionId": "session-one"}
+            result = {"status": "leaks_found", "applicationLeaks": 1,
+                      "libraryLeaks": 0, "signatures": [signature]}
+            with patch.dict("os.environ", {"LEAK_LOCAL_PROPERTIES": str(properties)}), patch(
+                    "urllib.request.urlopen", side_effect=lambda *args, **kwargs: io.BytesIO(b'{"errcode":0}')) as request:
+                self.assertEqual("sent", notify(event, result, directory, state))
+                self.assertEqual("deduplicated", notify(event, result, directory, state))
+                # 即使系统复用了 PID，新启动会话也允许重新发送。
+                event["sessionId"] = "session-two"
+                self.assertEqual("sent", notify(event, result, directory, state))
+                self.assertEqual(2, request.call_count)
 
     def test_private_properties_are_read_live_and_legacy_credentials_are_ignored(self):
         from leak.radar.notifier import notification_token, at_mobiles

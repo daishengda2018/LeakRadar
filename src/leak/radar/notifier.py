@@ -62,8 +62,10 @@ def notify(event, result, directory, state_file):
     token = notification_token(state_file.parent) if enabled else None
     # 只记录日志时不应用发送去重，保证每次分析报告都可见。
     state = json.loads(state_file.read_text()) if enabled and token and state_file.exists() else []
-    # 包名参与去重，不同 App 不互相屏蔽。
-    keys = [event["packageName"] + ":" + signature for signature in result["signatures"]]
+    # 按 App 启动会话隔离去重；旧客户端没有 sessionId 时退回进程 PID。
+    session = event.get("sessionId") or str(event["pid"])
+    prefix = event["packageName"] + ":" + session + ":"
+    keys = [prefix + signature for signature in result["signatures"]]
     fresh = [key for key in keys if key not in state]
     if not fresh:
         return "deduplicated"
@@ -94,7 +96,7 @@ def notify(event, result, directory, state_file):
     pending = state_file.with_suffix(".tmp")
     # 超长正文可能省略后续引用链，只对正文实际包含的签名记录发送成功。
     displayed = set(re.findall(r"^\d+\. Signature: \*([0-9a-f]{40})\*", traces, re.M))
-    sent_keys = [key for key in fresh if key.split(":", 1)[1] in displayed]
+    sent_keys = [key for key in fresh if key.rsplit(":", 1)[1] in displayed]
     pending.write_text(json.dumps(sorted(set(state + sent_keys))))
     pending.replace(state_file)
     logging.info("[LeakRadar] notification_sent report=%s", directory)

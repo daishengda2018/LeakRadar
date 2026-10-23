@@ -234,7 +234,7 @@ local.properties 已被 Git 忽略，源码和示例只允许占位符或明确�
 - `reports/<jobId>/`：event.json、capture.log、HPROF、analysis.log、result.json。由工具生成，仅本机保留，需由开发者手动清理；不发送原始 HPROF。
 - `.venv/`：uv 管理，可用 uv sync 重建。
 
-这些目录均忽略提交。分析确认有泄漏且配置钉钉 token 时才通知，按“包名＋Shark signature”在本机去重，成功发送后写记录；失败记为 notification=failed，不改变分析结果。当前无自动通知重试；需要重新分析或后续增加独立重试入口。机器人需支持 access-token 模式，尚未实现机器人加签。存在新签名时才发送通知；发送正文展示本次分析的全部 GC Root 引用链，与本次泄漏总数对应，引用链正文最多约 10 KB，超长时明确标记截断，完整内容保留在 analysis.log。这里的引用链描述对象持有关系，不是线程调用栈。发送开关默认开启，启用且配置有效 Token 时会发送真实消息；首次测试建议执行 `./scripts/dingtalk.sh off`。
+这些目录均忽略提交。分析确认有泄漏且配置钉钉 token 时才通知，按“包名＋App 启动 sessionId＋Shark signature”在本机去重；重启 App 后相同泄漏允许再次通知，旧客户端未传 sessionId 时退回 PID，成功发送后写记录；失败记为 notification=failed，不改变分析结果。当前无自动通知重试；需要重新分析或后续增加独立重试入口。机器人需支持 access-token 模式，尚未实现机器人加签。存在新签名时才发送通知；发送正文展示本次分析的全部 GC Root 引用链，与本次泄漏总数对应，引用链正文最多约 10 KB，超长时明确标记截断，完整内容保留在 analysis.log。这里的引用链描述对象持有关系，不是线程调用栈。发送开关默认开启，启用且配置有效 Token 时会发送真实消息；首次测试建议执行 `./scripts/dingtalk.sh off`。
 
 ## 验证与待完成项
 
