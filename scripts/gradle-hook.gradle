@@ -1,0 +1,88 @@
+import javax.inject.Inject
+import org.gradle.api.DefaultTask
+import org.gradle.api.GradleException
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.provider.Property
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.Internal
+import org.gradle.api.tasks.TaskAction
+import org.gradle.process.ExecOperations
+import org.gradle.work.DisableCachingByDefault
+
+/** 只在任务执行阶段检查服务，不参与编译产物缓存。 */
+@DisableCachingByDefault(because = '本地服务状态必须在每次执行时检查')
+abstract class EnsureLeakRadar extends DefaultTask {
+    @Input abstract Property<String> getTargetPackage()
+    @Input abstract Property<Boolean> getServiceEnabled()
+    @Input abstract Property<Boolean> getStrictMode()
+    @Internal abstract DirectoryProperty getToolDirectory()
+    @Internal abstract RegularFileProperty getLocalPropertiesFile()
+    @Inject abstract ExecOperations getExecOperations()
+
+    @TaskAction
+    void ensureService() {
+        // 必填配置校验独立于服务启停及宽松模式；不把隐私值存入任务属性。
+        Properties config = new Properties()
+        File propertiesFile = localPropertiesFile.get().asFile
+        if (propertiesFile.isFile()) propertiesFile.withInputStream { config.load(it) }
+        def missing = ['simpleLeakCanary.dingTalkToken', 'simpleLeakCanary.atMobiles'].findAll {
+            !config.getProperty(it, '').trim()
+        }
+        if (!missing.isEmpty()) {
+            throw new GradleException('local.properties 缺少必填配置：' + missing.join(', '))
+        }
+        if (!serviceEnabled.get()) {
+            logger.lifecycle('Leak Radar：已通过 leakRadar.enabled=false 关闭启动 Hook')
+            return
+        }
+        File directory = toolDirectory.get().asFile
+        File script = new File(directory, 'scripts/gradle-start.sh')
+        try {
+            if (!script.isFile()) {
+                throw new GradleException('缺少启动脚本，请先执行 git submodule update --init --recursive')
+            }
+            def result = execOperations.exec {
+                workingDir directory
+                commandLine '/bin/bash', script.absolutePath
+                environment 'LEAK_PACKAGE', targetPackage.get()
+                environment 'LEAK_LOCAL_PROPERTIES', propertiesFile.absolutePath
+                ignoreExitValue true
+            }
+            if (result.exitValue != 0) {
+                throw new GradleException("启动脚本退出码 ${result.exitValue}，详见上方输出")
+            }
+        } catch (Exception error) {
+            String message = "Leak Radar 服务未就绪：${error.message}"
+            if (strictMode.get()) throw new GradleException(message, error)
+            logger.warn(message + '；继续 Debug 构建')
+        }
+    }
+}
+
+plugins.withId('com.android.application') {
+    def alias = tasks.register('ensureLeakDetector') {
+        group = 'verification'
+        description = '检查默认 Debug 的 Leak Radar 服务，可用于 IDE Before launch'
+    }
+    androidComponents.onVariants(androidComponents.selector().withBuildType('debug')) { variant ->
+        String suffix = variant.name.capitalize()
+        def serviceTask = tasks.register("ensureLeakDetector${suffix}", EnsureLeakRadar) {
+            group = 'verification'
+            description = "检查 ${variant.name} 的 Leak Radar 服务"
+            targetPackage.set(variant.applicationId)
+            localPropertiesFile.set(rootProject.layout.projectDirectory.file(
+                    providers.gradleProperty('leakRadar.localProperties').getOrElse('local.properties')))
+            serviceEnabled.set(providers.gradleProperty('leakRadar.enabled').map { it.toBoolean() }.orElse(true))
+            strictMode.set(providers.gradleProperty('leakRadar.strict').map { it.toBoolean() }.orElse(false))
+            toolDirectory.set(rootProject.layout.projectDirectory.dir(
+                    providers.gradleProperty('leakRadar.directory').getOrElse('leak-radar')))
+        }
+        // AGP 8.x 预构建任务覆盖命令行构建与常规 IDE 部署构建。
+        tasks.configureEach {
+            if (name == "pre${suffix}Build") dependsOn(serviceTask)
+        }
+        // 多 flavor 项目使用明确的 ensureLeakDetector<Variant>，避免启动多个包名。
+        if (variant.name == 'debug') alias.configure { dependsOn(serviceTask) }
+    }
+}

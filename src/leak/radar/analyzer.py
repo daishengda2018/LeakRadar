@@ -1,4 +1,5 @@
 """Shark 2.14 的采集、文本契约解析及原始证据保存。"""
+import logging
 import os
 import signal
 import threading
@@ -102,6 +103,8 @@ def analyze(event, serial, directory):
         shark, version = check_shark()
         result["sharkVersion"] = version
         verify_process(serial, event)
+        logging.info("[LeakRadar] capture_started device=%s pid=%s report=%s",
+                     serial, event["pid"], directory)
         run_logged([shark, "--device", serial, "--process", event["packageName"],
                     "dump-process"], directory, "capture.log", 120)
         heaps = list(directory.glob("*.hprof"))
@@ -109,11 +112,15 @@ def analyze(event, serial, directory):
             raise RuntimeError("采集未产生唯一有效 HPROF")
         # CLI 按名称重新解析 PID；采集前后核验，变更则不采信结果。
         verify_process(serial, event)
+        logging.info("[LeakRadar] capture_finished bytes=%s", heaps[0].stat().st_size)
         result["status"] = "analysis_failed"
+        logging.info("[LeakRadar] analysis_started report=%s", directory)
         run_logged([shark, "--hprof", str(heaps[0]), "analyze"], directory,
                    "analysis.log", 600)
         result.update(parse_analysis((directory / "analysis.log").read_text()))
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         result["error"] = str(error)
+        logging.warning("[LeakRadar] job_failed stage=%s error=%s report=%s",
+                        result["status"], error, directory)
     (directory / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
     return result

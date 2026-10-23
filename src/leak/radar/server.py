@@ -12,8 +12,9 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from . import analyzer, notifier
+from .private_config import read_properties
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def validate_event(event, package):
@@ -26,6 +27,12 @@ def validate_event(event, package):
         raise ValueError("事件过期或设备时钟偏差超过 5 分钟")
     if not isinstance(event.get("reason"), str) or len(event["reason"]) > 1024:
         raise ValueError("reason 必须是长度不超过 1024 的字符串")
+    for key in ("appName", "versionName"):
+        if key in event and (not isinstance(event[key], str) or len(event[key]) > 128
+                             or "\n" in event[key] or "\r" in event[key]):
+            raise ValueError(key + " 必须为不超过 128 字符的单行文本")
+    if "versionCode" in event and (type(event["versionCode"]) is not int or event["versionCode"] < 0):
+        raise ValueError("versionCode 必须为非负整数")
     # 可选 candidates 仅归档，V1 不把它们当作 Shark 已确认的泄漏。
     return event
 
@@ -35,7 +42,7 @@ class Service:
         self.instance = os.environ["LEAK_INSTANCE"]
         self.package = os.environ["LEAK_PACKAGE"]
         self.serial = analyzer.device(os.getenv("DEVICE_SERIAL"))
-        self.token = os.getenv("LEAK_TOKEN", "")
+        self.token = read_properties(ROOT / ".runtime").get("leakRadar.httpToken", "")
         self.jobs = queue.Queue(maxsize=16)
         self.lock = threading.Lock()
         self.active = set()
@@ -67,7 +74,10 @@ class Service:
                 remaining = self.cooldown - (time.monotonic() - self.last_success.get(
                     event["pid"], -float("inf")))
                 if remaining > 0:
+                    logging.info("[LeakRadar] job_cooling job=%s seconds=%.1f", job, remaining)
                     time.sleep(remaining)
+                logging.info("[LeakRadar] job_started job=%s package=%s pid=%s",
+                             job, event["packageName"], event["pid"])
                 directory = self.reports / job
                 directory.mkdir()
                 (directory / "event.json").write_text(json.dumps(event, ensure_ascii=False, indent=2))
@@ -80,7 +90,8 @@ class Service:
                     result["notification"] = "failed"
                     result["notificationErrorType"] = type(error).__name__
                 (directory / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
-                logging.info("任务 %s：%s", job, result["status"])
+                logging.info("任务 %s：%s notification=%s report=%s", job, result["status"],
+                             result["notification"], directory)
                 if result["status"] in ("leaks_found", "no_leaks_found"):
                     with self.lock:
                         self.last_success[event["pid"]] = time.monotonic()
@@ -102,8 +113,8 @@ def main():
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", package):
         raise SystemExit("请配置有效的 LEAK_PACKAGE 主进程包名")
     host = os.getenv("LEAK_HOST", "127.0.0.1")
-    if host != "127.0.0.1" and not os.getenv("LEAK_TOKEN"):
-        raise SystemExit("非回环监听必须配置 LEAK_TOKEN")
+    if host != "127.0.0.1" and not read_properties(ROOT / ".runtime").get("leakRadar.httpToken"):
+        raise SystemExit("非回环监听必须在 local.properties 配置 leakRadar.httpToken")
     service = Service()
 
     class Handler(BaseHTTPRequestHandler):
@@ -121,7 +132,8 @@ def main():
                 return
             self.reply(200, {"service": "leak-detector", "instance": service.instance,
                              "pid": os.getpid(), "root": str(ROOT), "protocolVersion": 1,
-                             "packageName": service.package, "deviceSerial": service.serial})
+                             "packageName": service.package, "deviceSerial": service.serial,
+                             "notificationEnabled": bool(notifier.dingtalk_enabled(ROOT / ".runtime") and notifier.notification_token(ROOT / ".runtime"))})
 
         def do_POST(self):
             if self.path != "/leak-event":
@@ -137,8 +149,12 @@ def main():
                     raise ValueError("请求体必须为 1 至 65536 字节")
                 event = validate_event(json.loads(self.rfile.read(size)), service.package)
                 result = service.submit(event)
+                logging.info("[LeakRadar] event_received package=%s pid=%s retained=%s status=%s job=%s",
+                             event["packageName"], event["pid"], event["retainedCount"],
+                             result["status"], result.get("jobId", "merged"))
                 self.reply(202, result)
             except (ValueError, UnicodeDecodeError) as error:
+                logging.warning("[LeakRadar] event_rejected: %s", error)
                 self.reply(400, {"error": str(error)})
             except queue.Full:
                 self.reply(429, {"error": "queue full"})
@@ -155,6 +171,8 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     logging.info("服务启动，设备 %s，包名 %s", service.serial, service.package)
+    logging.info("[LeakRadar] notification_config enabled=%s",
+                 bool(notifier.dingtalk_enabled(ROOT / ".runtime") and notifier.notification_token(ROOT / ".runtime")))
     server.serve_forever()
 
 

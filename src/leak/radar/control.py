@@ -11,7 +11,8 @@ import urllib.error
 import urllib.request
 import uuid
 from .server import ROOT
-from . import analyzer
+from . import analyzer, notifier
+from .private_config import read_properties, properties_path
 
 RUNTIME = ROOT / ".runtime"
 STATE = RUNTIME / "service.json"
@@ -44,6 +45,25 @@ def reverse(serial, port):
 
 def main():
     action = sys.argv[1]
+    if action == "dingtalk":
+        if len(sys.argv) != 3 or sys.argv[2] not in ("on", "off"):
+            raise SystemExit("用法：dingtalk on / off")
+        enabled = sys.argv[2] == "on"
+        notifier.set_dingtalk_enabled(RUNTIME, enabled)
+        print("钉钉发送已" + ("开启" if enabled else "关闭，仅输出报告日志") + "；下次报告生效")
+        return
+    if action == "configure-dingtalk":
+        if len(sys.argv) > 2:
+            if len(sys.argv) != 4 or sys.argv[2] != "--properties":
+                raise SystemExit("用法：configure-dingtalk [--properties 本地配置路径]")
+            os.environ["LEAK_LOCAL_PROPERTIES"] = sys.argv[3]
+        config = read_properties(RUNTIME)
+        missing = [key for key in ("simpleLeakCanary.dingTalkToken", "simpleLeakCanary.atMobiles")
+                   if not config.get(key)]
+        if missing:
+            raise SystemExit("local.properties 缺少必填配置：" + ", ".join(missing))
+        print("local.properties 钉钉必填配置校验通过；未复制凭据、未发送消息")
+        return
     if action == "setup":
         for executable in ("adb", "java"):
             if not shutil.which(executable):
@@ -91,7 +111,7 @@ def main():
         instance = uuid.uuid4().hex
         env = dict(os.environ, LEAK_INSTANCE=instance, DEVICE_SERIAL=serial)
         with (RUNTIME / "server.log").open("a") as log:
-            process = subprocess.Popen([sys.executable, "-m", "leak_detector.server"],
+            process = subprocess.Popen([sys.executable, "-m", "leak.radar.server"],
                                        cwd=ROOT, env=env, stdout=log, stderr=log,
                                        start_new_session=True)
         state = {"pid": process.pid, "instance": instance, "port": port}

@@ -34,12 +34,13 @@ class Lifecycle(unittest.TestCase):
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', 0))
                 port = sock.getsockname()[1]
+            (root / "local.properties").write_text("leakRadar.httpToken=fixture-token\n")
             env = dict(os.environ, PYTHONPATH=str(root / "src"), LEAK_PORT=str(port),
-                       LEAK_PACKAGE="com.example.fixture", LEAK_TOKEN="fixture-token",
+                       LEAK_PACKAGE="com.example.fixture", LEAK_LOCAL_PROPERTIES=str(root / "local.properties"),
                        LEAK_HOST="127.0.0.1", DEVICE_SERIAL="fixture-device",
                        PATH=str(tools) + os.pathsep + os.environ["PATH"])
             def control(action):
-                return subprocess.run([sys.executable, '-m', 'leak_detector.control', action],
+                return subprocess.run([sys.executable, '-m', 'leak.radar.control', action],
                                       env=env, capture_output=True, text=True, timeout=20)
             try:
                 first = control('start')
